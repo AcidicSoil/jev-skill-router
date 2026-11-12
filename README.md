@@ -27,9 +27,59 @@ The screenshots below use **synthetic demo data**, not measured Jev accuracy or 
 
 - Codex CLI with plugin hooks, `SessionStart`, `UserPromptSubmit`, and app-server `skills/list`. Developed against **0.154.0**.
 - **Node.js 22+** available to the process running Codex.
-- A TypeSafe API key with access to Jev.
+- A TypeSafe API key with access to Jev **for the hosted plugin only**. The local `jev-droid` CLI does not require one.
 
 The shipped hook is bundled. Plugin users do **not** need `npm install`, Python, or an MCP server. App-launch startup uses the included macOS user LaunchAgent; session/prompt startup remains available on other platforms.
+
+## Local `jev-droid` CLI (fork-owned)
+
+This fork also provides an **offline-by-default local skill router** that uses
+the existing Codex catalog and the configured native System One decision model.
+It does not need a TypeSafe account, the Jev Local Bridge Python launcher,
+or any source checkout under `.runtime/selected-projects`.
+
+```sh
+./bin/jev-droid --help
+./bin/jev-droid list
+./bin/jev-droid "Review the Python code and its regression tests"
+./bin/jev-droid serve # manually launch the configured local GGUF
+```
+
+The installed command `~/.local/bin/jev-droid` points at `bin/jev-droid`.
+The existing Codex `UserPromptSubmit` hook uses the same command with JSON
+on stdin. Listing skills does not start a model. A routing query may start the
+owned `jev-droid-backend.service` and holds a lease until completion; the
+service shuts down after configured idle time.
+
+Local configuration: `~/.config/jev-skill-router/droid.json` (or
+`JEV_DROID_CONFIG`). This is a separate, local-only configuration from the
+hosted plugin's `config.json`. Example (replace paths with installed files):
+
+```json
+{
+  "schema": 1,
+  "endpoint": "http://127.0.0.1:8774",
+  "backend": {
+    "runtime": "native",
+    "model": "/path/to/native-decision.gguf",
+    "llama_bin": "/path/to/llama-server",
+    "auto_start": true,
+    "idle_timeout_seconds": 60
+  },
+  "settings": {
+    "threshold": 0.9,
+    "maxSkills": 10,
+    "timeoutMs": 60000,
+    "codexBin": "codex",
+    "recordSelections": true
+  }
+}
+```
+
+The model identity comes from `GET /v1/models` and is checked with a real
+`POST /v1/systemone` Noul probe before routing. Skill eligibility, batching,
+threshold, and selection use the existing fork router implementation. No
+remote requests, upstream checkout patches, or skill shortlisting are added.
 
 ## Install
 

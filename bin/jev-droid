@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+source_file=$(readlink -f "$0")
+project=$(dirname "$(dirname "$source_file")")
+if command -v node >/dev/null 2>&1; then
+  node_bin=$(command -v node)
+else
+  node_bin="$HOME/.local/share/mise/shims/node"
+fi
+if ! test -x "$node_bin"; then
+  echo "jev-droid: Node.js is unavailable" >&2
+  exit 127
+fi
+exec "$node_bin" "$project/plugins/jev-skill-router/scripts/jev-droid.mjs" "$@"

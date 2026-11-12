@@ -7361,6 +7361,10 @@ var require_dist = __commonJS({
   }
 });
 
+// src/router-cli.mjs
+import { resolve as resolve4 } from "node:path";
+import { pathToFileURL } from "node:url";
+
 // src/router.mjs
 var import_yaml = __toESM(require_dist(), 1);
 import { spawn as spawn2 } from "node:child_process";
@@ -7368,7 +7372,6 @@ import { readFile as readFile3, realpath } from "node:fs/promises";
 import { homedir as homedir2 } from "node:os";
 import { dirname as dirname2, isAbsolute as isAbsolute2, join as join3, resolve as resolve3 } from "node:path";
 import { createInterface } from "node:readline";
-import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 
 // src/records.mjs
@@ -7758,7 +7761,7 @@ function startDashboard({ dataDir, recordingEnabled = true, routingEnabled = tru
     }
   });
   server.requestTimeout = 1e4;
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const onError = (error) => reject(Object.assign(new Error("Dashboard could not start"), {
       code: error.code === "EADDRINUSE" ? "JEV_DASHBOARD_PORT_IN_USE" : "JEV_DASHBOARD_UNAVAILABLE"
     }));
@@ -7773,7 +7776,7 @@ function startDashboard({ dataDir, recordingEnabled = true, routingEnabled = tru
         idleTimer.unref();
         server.once("close", () => clearTimeout(idleTimer));
       }
-      resolve4(server);
+      resolve5(server);
     });
   });
 }
@@ -8097,7 +8100,7 @@ async function evaluate(batches, config, signal, fetchImpl = fetch) {
       while (next < batches.length) {
         combined.throwIfAborted();
         const batch = batches[next++];
-        const response = await fetchImpl(ENDPOINT, {
+        const response = await fetchImpl(config.endpoint ?? ENDPOINT, {
           method: "POST",
           redirect: "error",
           signal: combined,
@@ -8138,7 +8141,7 @@ async function route(input, config, { discover = readCatalog, fetchImpl = fetch,
     timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     cwd: resolve3(input.cwd),
     sessionId: typeof input.session_id === "string" && input.session_id.length <= 200 ? input.session_id : null,
-    model: config.model,
+    model: config.recordModel ?? config.model,
     threshold: config.threshold,
     maxSkills: config.maxSkills,
     candidateCount: null,
@@ -8255,7 +8258,9 @@ async function main() {
   if (warning) output.systemMessage = [output.systemMessage, warning].filter(Boolean).join(" ");
   return output;
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve3(process.argv[1])).href) {
+
+// src/router-cli.mjs
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve4(process.argv[1])).href) {
   main().catch((error) => {
     if (process.argv.length > 2) process.exitCode = 1;
     return fallback(error);
@@ -8269,6 +8274,7 @@ export {
   evaluate,
   fallback,
   loadConfig,
+  main,
   makeBatches,
   readCatalog,
   route

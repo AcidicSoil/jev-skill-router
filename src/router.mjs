@@ -3,7 +3,6 @@ import { readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
-import { pathToFileURL } from 'node:url';
 import { parseDocument } from 'yaml';
 import { randomUUID } from 'node:crypto';
 import { appendSelection } from './records.mjs';
@@ -188,7 +187,7 @@ export async function evaluate(batches, config, signal, fetchImpl = fetch) {
       while (next < batches.length) {
         combined.throwIfAborted();
         const batch = batches[next++];
-        const response = await fetchImpl(ENDPOINT, {
+        const response = await fetchImpl(config.endpoint ?? ENDPOINT, {
           method: 'POST', redirect: 'error', signal: combined,
           headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(batch),
@@ -225,7 +224,7 @@ export async function route(input, config, { discover = readCatalog, fetchImpl =
   const started = performance.now();
   const event = { version: 1, id: randomUUID(), timestamp: new Date().toISOString(), cwd: resolve(input.cwd),
     sessionId: typeof input.session_id === 'string' && input.session_id.length <= 200 ? input.session_id : null,
-    model: config.model, threshold: config.threshold, maxSkills: config.maxSkills,
+    model: config.recordModel ?? config.model, threshold: config.threshold, maxSkills: config.maxSkills,
     candidateCount: null, selected: [], status: 'error', errorCode: null, durationMs: 0 };
   let output = {};
   let failure;
@@ -279,7 +278,7 @@ export function fallback(error) {
   return { systemMessage: `Jev Skill Router unavailable (${errorCode(error)}); Codex's normal skill selection is unchanged.` };
 }
 
-async function main() {
+export async function main() {
   if (process.env.JEV_SKILL_ROUTER_DISABLED === '1' && process.argv.length === 2) return {};
   if (process.argv[2] === '--remove-app-startup') {
     if (process.argv.length !== 3) throw fail('JEV_ARGUMENT_INVALID');
@@ -330,11 +329,4 @@ async function main() {
   ]);
   if (warning) output.systemMessage = [output.systemMessage, warning].filter(Boolean).join(' ');
   return output;
-}
-
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  main().catch(error => {
-    if (process.argv.length > 2) process.exitCode = 1;
-    return fallback(error);
-  }).then(output => { if (output !== undefined) process.stdout.write(`${JSON.stringify(output)}\n`); });
 }
