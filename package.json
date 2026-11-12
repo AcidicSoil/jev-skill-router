@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node test/droid.test.mjs && node test/droid-cli.test.mjs && node test/router.test.mjs && node test/analytics.test.mjs && node test/autostart.test.mjs && node test/app-startup.test.mjs",
+    "test": "node test/droid.test.mjs && node test/droid-profiles.test.mjs && node test/droid-cli.test.mjs && node test/router.test.mjs && node test/analytics.test.mjs && node test/autostart.test.mjs && node test/app-startup.test.mjs",
     "dashboard": "node plugins/jev-skill-router/scripts/router.mjs --dashboard",
     "dashboard:demo": "node scripts/demo.mjs",
     "autostart:install": "node plugins/jev-skill-router/scripts/router.mjs --install-app-startup",

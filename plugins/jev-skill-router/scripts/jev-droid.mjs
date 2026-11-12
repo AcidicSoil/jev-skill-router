@@ -4849,7 +4849,7 @@ var require_compose_scalar = __commonJS({
     var resolveBlockScalar = require_resolve_block_scalar();
     var resolveFlowScalar = require_resolve_flow_scalar();
     function composeScalar(ctx, token, tagToken, onError) {
-      const { value, type, comment, range } = token.type === "block-scalar" ? resolveBlockScalar.resolveBlockScalar(ctx, token, onError) : resolveFlowScalar.resolveFlowScalar(token, ctx.options.strict, onError);
+      const { value, type, comment, range: range2 } = token.type === "block-scalar" ? resolveBlockScalar.resolveBlockScalar(ctx, token, onError) : resolveFlowScalar.resolveFlowScalar(token, ctx.options.strict, onError);
       const tagName = tagToken ? ctx.directives.tagName(tagToken.source, (msg) => onError(tagToken, "TAG_RESOLVE_FAILED", msg)) : null;
       let tag;
       if (ctx.options.stringKeys && ctx.atKey) {
@@ -4869,7 +4869,7 @@ var require_compose_scalar = __commonJS({
         onError(tagToken ?? token, "TAG_RESOLVE_FAILED", msg);
         scalar = new Scalar.Scalar(value);
       }
-      scalar.range = range;
+      scalar.range = range2;
       scalar.source = value;
       if (type)
         scalar.type = type;
@@ -7408,6 +7408,10 @@ async function appendSelection(dataDir, event) {
   await appendFile(join(dataDir, record.timestamp.slice(0, 10) + ".jsonl"), line, { mode: 384 });
 }
 
+// src/validation.mjs
+var fail = (code) => Object.assign(new Error(code), { code });
+var isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+
 // src/dashboard.mjs
 import { createHash } from "node:crypto";
 
@@ -7601,8 +7605,6 @@ var run = promisify(execFile);
 
 // src/router.mjs
 var ENDPOINT = "https://api.typesafe.ai/v1/systemone";
-var fail = (code) => Object.assign(new Error(code), { code });
-var isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 function readCatalog(cwd, { codexBin, signal }) {
   return new Promise((resolveResult, reject) => {
     const child = spawn(codexBin, ["app-server", "--stdio"], {
@@ -7705,7 +7707,7 @@ async function eligibleSkills(catalog) {
   }
   return skills;
 }
-function makeBatches(prompt, skills, model) {
+function makeBatches(prompt, skills, model, batchBytes = 6e4) {
   const state = { user_request: prompt };
   const stateBytes = Buffer.byteLength(JSON.stringify(state));
   if (stateBytes > 24e3) throw fail("JEV_PROMPT_TOO_LARGE");
@@ -7724,8 +7726,9 @@ function makeBatches(prompt, skills, model) {
     if (stateBytes + Buffer.byteLength(JSON.stringify(question)) > 3e4) throw fail("JEV_QUESTION_TOO_LARGE");
     const id = `s${index}`;
     request.questions[id] = question;
-    if (Buffer.byteLength(JSON.stringify(request)) > 6e4) {
+    if (Buffer.byteLength(JSON.stringify(request)) > batchBytes) {
       delete request.questions[id];
+      if (!Object.keys(request.questions).length) throw fail("JEV_QUESTION_TOO_LARGE");
       batches.push(request);
       request = { model, state, questions: { [id]: question } };
     }
@@ -7750,7 +7753,7 @@ async function evaluate(batches, config, signal, fetchImpl = fetch) {
   const scores = /* @__PURE__ */ new Map();
   let next = 0;
   try {
-    await Promise.all(Array.from({ length: Math.min(3, batches.length) }, async () => {
+    await Promise.all(Array.from({ length: Math.min(config.concurrency ?? 3, batches.length) }, async () => {
       while (next < batches.length) {
         combined.throwIfAborted();
         const batch = batches[next++];
@@ -7816,7 +7819,7 @@ async function route(input, config, { discover = readCatalog, fetchImpl = fetch,
     if (!skills.length) {
       event.status = "no_candidates";
     } else {
-      const scores = await evaluate(makeBatches(input.prompt, skills, config.model), config, signal, fetchImpl);
+      const scores = await evaluate(makeBatches(input.prompt, skills, config.model, config.batchBytes), config, signal, fetchImpl);
       const selected = skills.map((skill, index) => ({ name: skill.name, path: skill.path, probability: scores.get(index) })).filter((skill) => skill.probability >= config.threshold).sort((a, b) => b.probability - a.probability || a.path.localeCompare(b.path)).slice(0, config.maxSkills);
       event.selected = selected;
       event.status = selected.length ? "selected" : "none";
@@ -7849,15 +7852,21 @@ function errorCode(error) {
   return /^JEV_[A-Z0-9_]{1,80}$/u.test(error?.code) ? error.code : ["AbortError", "TimeoutError"].includes(error?.name) ? "JEV_TIMEOUT" : "JEV_UNAVAILABLE";
 }
 
+// src/droid-cli.mjs
+import { basename as basename2 } from "node:path";
+
 // src/local-droid.mjs
 import { spawn as spawn2 } from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { mkdir as mkdir2, readFile as readFile3, readdir as readdir2, realpath as realpath2, rm, stat as stat2, writeFile } from "node:fs/promises";
+import { mkdir as mkdir2, open, readdir as readdir3, rm, stat as stat3, writeFile } from "node:fs/promises";
+import { join as join4 } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+
+// src/droid-config.mjs
+import { readFile as readFile3, readdir as readdir2, realpath as realpath2, stat as stat2 } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname as dirname2, isAbsolute as isAbsolute3, join as join3, resolve as resolve2 } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
-var invalid = (code) => Object.assign(new Error(code), { code });
-var isObject2 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+var defaultFile = () => process.env.JEV_DROID_CONFIG || join3(homedir(), ".config", "jev-skill-router", "droid.json");
 var limits = {
   idle_timeout_seconds: [1, 3600],
   startup_timeout_seconds: [1, 300],
@@ -7866,82 +7875,172 @@ var limits = {
   batch_size: [1, 1e6],
   ubatch_size: [1, 1e6]
 };
-function loopbackEndpoint(value) {
+async function readConfig(file) {
   try {
-    const url = new URL(value);
-    if (url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) && url.port && url.pathname === "/" && !url.search && !url.hash && !url.username && !url.password) {
-      return url.origin;
-    }
+    const raw = JSON.parse(await readFile3(file, "utf8"));
+    if (isObject(raw) && raw.schema === 1 && isObject(raw.settings) && (raw.profiles === void 0 || isObject(raw.profiles))) return raw;
   } catch {
   }
-  throw invalid("JEV_DROID_CONFIG_INVALID");
+  throw fail("JEV_DROID_CONFIG_INVALID");
 }
-async function loadDroidConfig(file = process.env.JEV_DROID_CONFIG || join3(homedir(), ".config", "jev-skill-router", "droid.json")) {
-  let raw;
+function loopbackEndpoint(value) {
+  let url;
   try {
-    raw = JSON.parse(await readFile3(file, "utf8"));
+    url = new URL(value);
   } catch {
-    throw invalid("JEV_DROID_CONFIG_INVALID");
+    throw fail("JEV_DROID_CONFIG_INVALID");
   }
-  if (!isObject2(raw) || raw.schema !== 1 || !isObject2(raw.backend) || !["native", "gateway"].includes(raw.backend.runtime) || !isObject2(raw.settings)) {
-    throw invalid("JEV_DROID_CONFIG_INVALID");
-  }
-  const endpoint = loopbackEndpoint(raw.endpoint);
-  const backend = raw.backend;
-  const settings = raw.settings;
-  const range = (value, [min, max]) => Number.isInteger(value) && value >= min && value <= max;
-  if (!range(settings.timeoutMs ?? 12e3, [100, 9e4]) || !range(settings.maxSkills ?? 3, [1, 20]) || typeof (settings.threshold ?? 0.8) !== "number" || !((settings.threshold ?? 0.8) > 0.5) || (settings.threshold ?? 0.8) > 1 || Object.entries(limits).some(([name, bounds]) => backend[name] !== void 0 && !range(backend[name], bounds)) || backend.auto_start !== void 0 && typeof backend.auto_start !== "boolean" || backend.runtime === "gateway" && backend.auto_start || backend.runtime === "native" && typeof backend.model !== "string") {
-    throw invalid("JEV_DROID_CONFIG_INVALID");
+  const valid = [
+    url.protocol === "http:",
+    ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname),
+    Boolean(url.port),
+    url.pathname === "/",
+    !url.search,
+    !url.hash,
+    !url.username,
+    !url.password
+  ].every(Boolean);
+  if (!valid) throw fail("JEV_DROID_CONFIG_INVALID");
+  return url.origin;
+}
+var range = (value, [min, max]) => Number.isInteger(value) && value >= min && value <= max;
+var settingsRanges = {
+  timeoutMs: [100, 9e4],
+  maxSkills: [1, 20],
+  batchBytes: [2e3, 6e4],
+  concurrency: [1, 3]
+};
+function normalizeSettings(options) {
+  const settings = {
+    threshold: 0.8,
+    maxSkills: 3,
+    batchBytes: 6e4,
+    concurrency: 3,
+    timeoutMs: 12e3,
+    codexBin: "codex",
+    recordSelections: true,
+    dataDir: join3(homedir(), ".local", "share", "jev-skill-router"),
+    ...options,
+    apiKey: "local"
+  };
+  const valid = [
+    Object.entries(settingsRanges).every(([name, bounds]) => range(settings[name], bounds)),
+    Number.isFinite(settings.threshold) && settings.threshold > 0.5 && settings.threshold <= 1,
+    typeof settings.codexBin === "string" && Boolean(settings.codexBin.trim()),
+    typeof settings.recordSelections === "boolean",
+    typeof settings.dataDir === "string" && isAbsolute3(settings.dataDir)
+  ].every(Boolean);
+  if (!valid) throw fail("JEV_DROID_CONFIG_INVALID");
+  return settings;
+}
+function validBackendRuntime(backend) {
+  return ["native", "gateway", "managed"].includes(backend.runtime) && (backend.auto_start === void 0 || typeof backend.auto_start === "boolean") && (backend.runtime !== "gateway" || !backend.auto_start);
+}
+function validManagedEnvironment(env) {
+  return env === void 0 || isObject(env) && Object.entries(env).every(([key, value]) => /^[A-Z][A-Z0-9_]*$/u.test(key) && typeof value === "string");
+}
+function validManagedCommand(backend) {
+  return typeof backend.command === "string" && isAbsolute3(backend.command) && Array.isArray(backend.args) && backend.args.every((arg) => typeof arg === "string") && validManagedEnvironment(backend.env);
+}
+function validBackendModel(backend) {
+  return (backend.runtime !== "managed" || validManagedCommand(backend)) && (backend.runtime !== "native" || typeof backend.model === "string") && (backend.model_id === void 0 || typeof backend.model_id === "string" && Boolean(backend.model_id.trim()));
+}
+function validBackendStart(backend, profile) {
+  return (backend.start === void 0 || ["systemd", "process"].includes(backend.start)) && (backend.runtime !== "gateway" || backend.start === void 0) && (profile === "default" || backend.start !== "systemd");
+}
+function validBackendLoadOptions(backend) {
+  const fit = backend.fit === void 0 || ["on", "off"].includes(backend.fit);
+  const load = backend.load_mode === void 0 || ["auto", "none", "mmap", "mlock", "mmap+mlock", "dio"].includes(backend.load_mode);
+  return fit && load && (backend.no_warmup === void 0 || typeof backend.no_warmup === "boolean");
+}
+function normalizeBackend(backend, file, profile) {
+  const validLimits = Object.entries(limits).every(([name, bounds]) => backend[name] === void 0 || range(backend[name], bounds));
+  if (![
+    validBackendRuntime(backend),
+    validBackendModel(backend),
+    validBackendStart(backend, profile),
+    validLimits,
+    validBackendLoadOptions(backend)
+  ].every(Boolean)) {
+    throw fail("JEV_DROID_CONFIG_INVALID");
   }
   const model = backend.model?.startsWith("~/") ? join3(homedir(), backend.model.slice(2)) : backend.model;
-  const config = {
-    endpoint,
-    backend: { ...backend, ...model ? { model: isAbsolute3(model) ? model : resolve2(dirname2(file), model) } : {} },
-    settings: {
-      threshold: settings.threshold ?? 0.8,
-      maxSkills: settings.maxSkills ?? 3,
-      timeoutMs: settings.timeoutMs ?? 12e3,
-      codexBin: settings.codexBin ?? "codex",
-      recordSelections: settings.recordSelections ?? true,
-      dataDir: settings.dataDir ?? join3(homedir(), ".local", "share", "jev-skill-router"),
-      apiKey: "local"
-    },
-    leaseDir: join3(dirname2(file), "droid-leases")
+  return {
+    ...backend,
+    start: backend.start ?? (profile === "default" ? "systemd" : "process"),
+    ...model ? { model: isAbsolute3(model) ? model : resolve2(dirname2(file), model) } : {}
   };
-  if (!isAbsolute3(config.settings.dataDir)) throw invalid("JEV_DROID_CONFIG_INVALID");
-  return config;
+}
+function selectProfile(raw, profile) {
+  if (!/^[a-z][a-z0-9_-]{0,49}$/u.test(profile)) throw fail("JEV_DROID_PROFILE_UNKNOWN");
+  const selected = profile === "default" ? raw : raw.profiles?.[profile];
+  if (!selected) throw fail("JEV_DROID_PROFILE_UNKNOWN");
+  const valid = [
+    isObject(selected),
+    isObject(selected.backend),
+    selected.settings === void 0 || isObject(selected.settings)
+  ].every(Boolean);
+  if (!valid) throw fail("JEV_DROID_CONFIG_INVALID");
+  return selected;
+}
+async function listDroidProfiles(file = defaultFile()) {
+  const raw = await readConfig(file);
+  const names = Object.keys(raw.profiles ?? {});
+  if (names.some((name) => !/^[a-z][a-z0-9_-]{0,49}$/u.test(name) || name === "default")) {
+    throw fail("JEV_DROID_CONFIG_INVALID");
+  }
+  return ["default", ...names];
+}
+async function loadDroidConfig(file = defaultFile(), profile = process.env.JEV_DROID_PROFILE || "default") {
+  const raw = await readConfig(file);
+  const selected = selectProfile(raw, profile);
+  return {
+    file,
+    profile,
+    endpoint: loopbackEndpoint(selected.endpoint),
+    backend: normalizeBackend(selected.backend, file, profile),
+    settings: normalizeSettings({ ...raw.settings, ...profile === "default" ? {} : selected.settings }),
+    leaseDir: join3(dirname2(file), "droid-leases", ...profile === "default" ? [] : [profile])
+  };
+}
+async function isRegularFile(path) {
+  try {
+    return (await stat2(path)).isFile();
+  } catch {
+    return false;
+  }
+}
+async function cachedModels(snapshot, filename) {
+  let revisions;
+  try {
+    revisions = await readdir2(snapshot);
+  } catch {
+    return [];
+  }
+  return (await Promise.all(revisions.map(async (revision) => {
+    const candidate = join3(snapshot, revision, filename);
+    return await isRegularFile(candidate) ? candidate : null;
+  }))).filter(Boolean);
 }
 async function resolveNativeModel(model) {
-  if (!model || !model.endsWith(".gguf")) throw invalid("JEV_DROID_MODEL_MISSING");
-  try {
-    if ((await stat2(model)).isFile()) return model;
-  } catch {
-  }
+  if (!model || !model.endsWith(".gguf")) throw fail("JEV_DROID_MODEL_MISSING");
+  if (await isRegularFile(model)) return model;
   const snapshot = dirname2(dirname2(model));
   if (basename(snapshot) !== "snapshots" || !basename(dirname2(snapshot)).startsWith("models--")) {
-    throw invalid("JEV_DROID_MODEL_MISSING");
+    throw fail("JEV_DROID_MODEL_MISSING");
   }
-  const paths = [];
-  for (const revision of await readdir2(snapshot)) {
-    const candidate = join3(snapshot, revision, basename(model));
-    try {
-      if ((await stat2(candidate)).isFile()) paths.push(candidate);
-    } catch {
-    }
-  }
+  const paths = await cachedModels(snapshot, basename(model));
   const revisions = new Set(await Promise.all(paths.map((path) => realpath2(path))));
-  if (revisions.size > 1) throw invalid("JEV_DROID_MODEL_AMBIGUOUS");
-  if (revisions.size === 0) throw invalid("JEV_DROID_MODEL_MISSING");
+  if (revisions.size === 0) throw fail("JEV_DROID_MODEL_MISSING");
+  if (revisions.size > 1) throw fail("JEV_DROID_MODEL_AMBIGUOUS");
   return paths[0];
 }
-function backendCommand(config, model = config.backend.model) {
-  if (config.backend.runtime !== "native") throw invalid("JEV_DROID_RUNTIME_UNSUPPORTED");
-  const backend = config.backend;
+function nativeServerArgs(backend, endpoint, model) {
   const argv = [
     "--host",
     "127.0.0.1",
     "--port",
-    new URL(config.endpoint).port,
+    new URL(endpoint).port,
     "--model",
     model,
     "--no-webui"
@@ -7954,21 +8053,55 @@ function backendCommand(config, model = config.backend.model) {
   })) {
     if (backend[option] !== void 0) argv.push(flag, String(backend[option]));
   }
-  return [backend.llama_bin ?? "llama-server", argv];
+  if (backend.load_mode !== void 0) argv.push("--load-mode", backend.load_mode);
+  if (backend.no_warmup) argv.push("--no-warmup");
+  if (backend.fit !== void 0) argv.push("--fit", backend.fit);
+  return argv;
 }
+function backendCommand(config, model = config.backend.model) {
+  const backend = config.backend;
+  if (backend.runtime === "managed") {
+    return [backend.command, [...backend.args, "--port", new URL(config.endpoint).port]];
+  }
+  if (backend.runtime !== "native") throw fail("JEV_DROID_RUNTIME_UNSUPPORTED");
+  return [backend.llama_bin ?? "llama-server", nativeServerArgs(backend, config.endpoint, model)];
+}
+
+// src/local-droid.mjs
 async function getJson(url, options, fetchImpl) {
   const response = await fetchImpl(url, { ...options, redirect: "error" });
-  if (!response.ok) throw invalid("JEV_DROID_DECISION_INVALID");
+  if (!response.ok) throw fail("JEV_DROID_DECISION_INVALID");
   return response.json();
+}
+function catalogModelIds(catalog) {
+  if (!Array.isArray(catalog?.data) || !catalog.data.length) {
+    throw fail("JEV_DROID_DECISION_INVALID");
+  }
+  const ids = catalog.data.map((item) => item?.id);
+  if (ids.some((id) => typeof id !== "string" || !id)) {
+    throw fail("JEV_DROID_DECISION_INVALID");
+  }
+  return ids;
+}
+function selectedModelId(catalog, requested) {
+  const ids = catalogModelIds(catalog);
+  const model = requested ?? (ids.length === 1 ? ids[0] : null);
+  if (!model || !ids.includes(model)) throw fail("JEV_DROID_DECISION_INVALID");
+  return model;
+}
+function validProbeModel(answer, model, backend) {
+  return typeof answer?.model === "string" && Boolean(answer.model) && (!backend.model_id || answer.model === model);
+}
+function validProbeScore(probe) {
+  return probe?.type === "noul" && Number.isFinite(probe?.noul) && probe.noul >= 0 && probe.noul <= 1;
 }
 async function probeDecision(config, fetchImpl = fetch) {
   try {
     const signal = AbortSignal.timeout(config.settings.timeoutMs);
-    const catalog = await getJson(config.endpoint + "/v1/models", { signal }, fetchImpl);
-    if (!Array.isArray(catalog?.data) || catalog.data.length !== 1 || typeof catalog.data[0]?.id !== "string" || !catalog.data[0].id) {
-      throw invalid("JEV_DROID_DECISION_INVALID");
-    }
-    const model = catalog.data[0].id;
+    const model = config.backend.runtime === "managed" && config.backend.model_id ? config.backend.model_id : selectedModelId(
+      await getJson(config.endpoint + "/v1/models", { signal }, fetchImpl),
+      config.backend.model_id
+    );
     const request = {
       model,
       state: { purpose: "protocol compatibility check" },
@@ -7984,12 +8117,12 @@ async function probeDecision(config, fetchImpl = fetch) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request)
     }, fetchImpl);
-    if (typeof answer?.model !== "string" || !answer.model || answer.answers?.probe?.type !== "noul" || !Number.isFinite(answer.answers.probe.noul) || answer.answers.probe.noul < 0 || answer.answers.probe.noul > 1) {
-      throw invalid("JEV_DROID_DECISION_INVALID");
+    if (!(validProbeModel(answer, model, config.backend) && validProbeScore(answer?.answers?.probe))) {
+      throw fail("JEV_DROID_DECISION_INVALID");
     }
     return model;
   } catch {
-    throw invalid("JEV_DROID_DECISION_INVALID");
+    throw fail("JEV_DROID_DECISION_INVALID");
   }
 }
 async function healthy(config, fetchImpl = fetch) {
@@ -8004,38 +8137,77 @@ async function healthy(config, fetchImpl = fetch) {
     return false;
   }
 }
-async function startOwnedService() {
-  const child = spawn2(
-    "systemctl",
-    ["--user", "start", "jev-droid-backend.service"],
-    { stdio: "ignore" }
-  );
-  return new Promise((done, reject) => {
-    child.once("error", reject);
-    child.once("exit", (code) => code === 0 ? done() : reject(invalid("JEV_DROID_SERVICE_FAILED")));
-  });
+async function startOwnedBackend(config) {
+  if (config.backend.start === "systemd") {
+    const child = spawn2(
+      "systemctl",
+      ["--user", "start", "jev-droid-backend.service"],
+      { stdio: "ignore" }
+    );
+    return new Promise((done, reject) => {
+      child.once("error", reject);
+      child.once("exit", (code) => code === 0 ? done() : reject(fail("JEV_DROID_SERVICE_FAILED")));
+    });
+  }
+  const log = await open(join4(config.leaseDir, "server.log"), "a", 384);
+  try {
+    const child = spawn2(process.execPath, [
+      process.argv[1],
+      "--model",
+      config.profile,
+      "serve"
+    ], {
+      detached: true,
+      stdio: ["ignore", log.fd, log.fd],
+      env: { ...process.env, JEV_DROID_CONFIG: config.file }
+    });
+    return await new Promise((done, reject) => {
+      child.once("error", reject);
+      child.once("spawn", () => {
+        child.unref();
+        done(child.pid);
+      });
+    });
+  } finally {
+    await log.close();
+  }
+}
+function requireRunningChild(pid) {
+  if (!pid) return;
+  try {
+    process.kill(pid, 0);
+  } catch {
+    throw fail("JEV_DROID_SERVICE_FAILED");
+  }
+}
+async function awaitNativeReady(config, fetchImpl, childPid) {
+  const until = Date.now() + (config.backend.startup_timeout_seconds ?? 120) * 1e3;
+  while (Date.now() < until && !await healthy(config, fetchImpl)) {
+    requireRunningChild(childPid);
+    await sleep(500);
+  }
+  if (!await healthy(config, fetchImpl)) throw fail("JEV_DROID_BACKEND_UNAVAILABLE");
 }
 async function ensureDecisionBackend(config, fetchImpl = fetch) {
-  if (!await healthy(config, fetchImpl)) {
-    if (!config.backend.auto_start || config.backend.runtime !== "native") {
-      throw invalid("JEV_DROID_BACKEND_UNAVAILABLE");
-    }
-    await startOwnedService();
-    const until = Date.now() + (config.backend.startup_timeout_seconds ?? 120) * 1e3;
-    while (Date.now() < until && !await healthy(config, fetchImpl)) await sleep(500);
-    if (!await healthy(config, fetchImpl)) throw invalid("JEV_DROID_BACKEND_UNAVAILABLE");
+  if (config.backend.runtime === "gateway") return probeDecision(config, fetchImpl);
+  if (await healthy(config, fetchImpl)) return probeDecision(config, fetchImpl);
+  if (!config.backend.auto_start || !["native", "managed"].includes(config.backend.runtime)) {
+    throw fail("JEV_DROID_BACKEND_UNAVAILABLE");
   }
+  await mkdir2(config.leaseDir, { recursive: true, mode: 448 });
+  const childPid = await startOwnedBackend(config);
+  await awaitNativeReady(config, fetchImpl, childPid);
   return probeDecision(config, fetchImpl);
 }
 async function withLease(dir, run2) {
   await mkdir2(dir, { recursive: true, mode: 448 });
-  const file = join3(dir, String(process.pid) + "-" + randomUUID2());
+  const file = join4(dir, String(process.pid) + "-" + randomUUID2());
   await writeFile(file, "", { mode: 384, flag: "wx" });
   try {
     return await run2();
   } finally {
     await rm(file);
-    await writeFile(join3(dir, "activity"), String(Date.now()), { mode: 384 });
+    await writeFile(join4(dir, "activity"), String(Date.now()), { mode: 384 });
   }
 }
 function runDroidEvent(input, config, dependencies = {}) {
@@ -8046,13 +8218,13 @@ function runDroidEvent(input, config, dependencies = {}) {
       ...config.settings,
       endpoint: config.endpoint + "/v1/systemone",
       model,
-      recordModel: "jev-local"
+      recordModel: config.profile === "default" || !config.profile ? "jev-local" : "jev-" + config.profile
     }, dependencies);
   });
 }
 async function hasActiveLeases(dir) {
   try {
-    const items = (await readdir2(dir)).filter((name) => name !== "activity");
+    const items = (await readdir3(dir)).filter((name) => name !== "activity");
     return items.some((name) => {
       const pid = Number(name.split("-")[0]);
       if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -8069,17 +8241,35 @@ async function hasActiveLeases(dir) {
 }
 async function lastActivity(dir) {
   try {
-    return (await stat2(join3(dir, "activity"))).mtimeMs;
+    return (await stat3(join4(dir, "activity"))).mtimeMs;
   } catch {
     return Date.now();
   }
 }
+async function ownedBackendCommand(config) {
+  const model = config.backend.runtime === "native" ? await resolveNativeModel(config.backend.model) : void 0;
+  return backendCommand(config, model);
+}
+function ownedBackendEnvironment(config) {
+  return {
+    ...process.env,
+    ...config.backend.env,
+    JEV_DROID_LEASE_DIR: config.leaseDir,
+    JEV_LLAMA_LOAD_MODE: config.backend.load_mode ?? "",
+    JEV_LLAMA_NO_WARMUP: config.backend.no_warmup ? "1" : "0",
+    ...config.backend.fit ? { JEV_LLAMA_FIT: config.backend.fit } : {},
+    ...config.backend.ctx_size ? { JEV_LLAMA_CTX_SIZE: String(config.backend.ctx_size) } : {},
+    ...config.backend.gpu_layers !== void 0 ? { JEV_LLAMA_GPU_LAYERS: String(config.backend.gpu_layers) } : {}
+  };
+}
 async function serveNative(config) {
-  const model = await resolveNativeModel(config.backend.model);
-  const [binary, args] = backendCommand(config, model);
+  const [binary, args] = await ownedBackendCommand(config);
   await mkdir2(config.leaseDir, { recursive: true, mode: 448 });
-  await writeFile(join3(config.leaseDir, "activity"), String(Date.now()), { mode: 384 });
-  const child = spawn2(binary, args, { stdio: "inherit" });
+  await writeFile(join4(config.leaseDir, "activity"), String(Date.now()), { mode: 384 });
+  const child = spawn2(binary, args, {
+    stdio: "inherit",
+    env: ownedBackendEnvironment(config)
+  });
   let exited = false;
   let code = 0;
   child.once("exit", (exitCode, signal) => {
@@ -8112,9 +8302,12 @@ async function serveNative(config) {
 var usage = `jev-droid \u2014 local Droid-Q skill routing
 
 Usage:
+  jev-droid models            List configured model profiles without loading models
   jev-droid list              List eligible Codex skills without loading a model
   jev-droid "task description" Recommend skills using the configured local model
-  jev-droid serve             Serve the configured local GGUF with idle unload
+  jev-droid --model NAME "task description"  Route using a named model profile
+  jev-droid --model NAME serve               Serve its local GGUF with idle unload
+  jev-droid serve             Serve the default local GGUF with idle unload
   jev-droid --help            Show this help
 
 Without arguments, reads a Codex UserPromptSubmit hook event on stdin.
@@ -8129,40 +8322,80 @@ async function readEvent() {
   }
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
-async function main(args) {
-  if (args.length === 1 && ["--help", "-h"].includes(args[0])) {
-    process.stdout.write(usage + "\n");
-    return;
+function parseNamedCommand(args) {
+  if (args.length !== 3 || !args[1]?.trim() || args[2] === "models") {
+    throw new Error("JEV_DROID_ARGUMENT_INVALID");
   }
+  return { action: args[2], profile: args[1] };
+}
+function parseCommand(args) {
+  if (args[0] === "--model") return parseNamedCommand(args);
   if (args.length > 1) throw new Error("JEV_DROID_ARGUMENT_INVALID");
-  const config = await loadDroidConfig();
-  if (args[0] === "serve") {
-    process.exitCode = await serveNative(config);
-    return;
-  }
-  if (args[0] === "list") {
-    const catalog = await readCatalog(process.cwd(), {
-      codexBin: config.settings.codexBin,
-      signal: AbortSignal.timeout(config.settings.timeoutMs)
-    });
-    const skills = await eligibleSkills(catalog);
-    process.stdout.write(JSON.stringify({
-      apiKeyConfigured: true,
-      catalogCount: catalog.skills.length,
-      candidateCount: skills.length,
-      catalogErrors: catalog.errors?.length ?? 0,
-      skills: skills.map(({ name, path }) => ({ name, path }))
-    }) + "\n");
-    return;
-  }
-  if (args.length && !args[0].trim()) throw new Error("JEV_DROID_ARGUMENT_INVALID");
-  const input = args.length ? { hook_event_name: "UserPromptSubmit", cwd: process.cwd(), prompt: args[0] } : await readEvent();
+  return { action: args[0], profile: void 0 };
+}
+async function printProfiles() {
+  const names = await listDroidProfiles();
+  const profiles = await Promise.all(names.map(async (name) => {
+    const config = await loadDroidConfig(void 0, name);
+    const modelPath = config.backend.runtime === "native" ? config.backend.model : config.backend.runtime === "managed" && config.backend.args[0] === "staged" ? config.backend.args[1] : null;
+    let modelPresent = null;
+    if (modelPath) {
+      try {
+        await resolveNativeModel(modelPath);
+        modelPresent = true;
+      } catch {
+        modelPresent = false;
+      }
+    }
+    return {
+      name,
+      runtime: config.backend.runtime,
+      endpoint: config.endpoint,
+      model: modelPath ? basename2(modelPath) : config.backend.model_id ?? null,
+      modelPresent,
+      autoStart: !!config.backend.auto_start
+    };
+  }));
+  process.stdout.write(JSON.stringify({ profiles }) + "\n");
+}
+async function printSkills(config) {
+  const catalog = await readCatalog(process.cwd(), {
+    codexBin: config.settings.codexBin,
+    signal: AbortSignal.timeout(config.settings.timeoutMs)
+  });
+  const skills = await eligibleSkills(catalog);
+  process.stdout.write(JSON.stringify({
+    apiKeyConfigured: true,
+    catalogCount: catalog.skills.length,
+    candidateCount: skills.length,
+    catalogErrors: catalog.errors?.length ?? 0,
+    skills: skills.map(({ name, path }) => ({ name, path }))
+  }) + "\n");
+}
+async function routeCommand(action, config) {
+  if (action !== void 0 && !action.trim()) throw new Error("JEV_DROID_ARGUMENT_INVALID");
+  const input = action === void 0 ? await readEvent() : { hook_event_name: "UserPromptSubmit", cwd: process.cwd(), prompt: action };
   if (input?.hook_event_name !== "UserPromptSubmit") {
     process.stdout.write("{}\n");
     return;
   }
   const result = await runDroidEvent(input, config);
   process.stdout.write(JSON.stringify(result) + "\n");
+}
+async function main(args) {
+  if (args.length === 1 && ["--help", "-h"].includes(args[0])) {
+    process.stdout.write(usage + "\n");
+    return;
+  }
+  const { action, profile } = parseCommand(args);
+  if (action === "models") return printProfiles();
+  const config = await loadDroidConfig(void 0, profile);
+  if (action === "list") return printSkills(config);
+  if (action === "serve") {
+    process.exitCode = await serveNative(config);
+    return;
+  }
+  return routeCommand(action, config);
 }
 var hookMode = process.argv.length === 2;
 main(process.argv.slice(2)).catch((error) => {

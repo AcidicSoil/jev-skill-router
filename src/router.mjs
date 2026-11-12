@@ -6,12 +6,11 @@ import { createInterface } from 'node:readline';
 import { parseDocument } from 'yaml';
 import { randomUUID } from 'node:crypto';
 import { appendSelection } from './records.mjs';
+import { fail, isObject } from './validation.mjs';
 import { ensureDashboard, startDashboard } from './dashboard.mjs';
 import { installAppStartup, removeAppStartup, startDashboardForApp } from './app-startup.mjs';
 
 const ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
-const fail = code => Object.assign(new Error(code), { code });
-const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
 export async function loadConfig(env = process.env) {
   const file = env.JEV_SKILL_ROUTER_CONFIG || join(homedir(), '.config', 'jev-skill-router', 'config.json');
@@ -135,7 +134,7 @@ export async function eligibleSkills(catalog) {
   return skills;
 }
 
-export function makeBatches(prompt, skills, model) {
+export function makeBatches(prompt, skills, model, batchBytes = 60000) {
   const state = { user_request: prompt };
   const stateBytes = Buffer.byteLength(JSON.stringify(state));
   if (stateBytes > 24000) throw fail('JEV_PROMPT_TOO_LARGE');
@@ -155,8 +154,9 @@ export function makeBatches(prompt, skills, model) {
     if (stateBytes + Buffer.byteLength(JSON.stringify(question)) > 30000) throw fail('JEV_QUESTION_TOO_LARGE');
     const id = `s${index}`;
     request.questions[id] = question;
-    if (Buffer.byteLength(JSON.stringify(request)) > 60000) {
+    if (Buffer.byteLength(JSON.stringify(request)) > batchBytes) {
       delete request.questions[id];
+      if (!Object.keys(request.questions).length) throw fail('JEV_QUESTION_TOO_LARGE');
       batches.push(request);
       request = { model, state, questions: { [id]: question } };
     }
@@ -183,7 +183,7 @@ export async function evaluate(batches, config, signal, fetchImpl = fetch) {
   const scores = new Map();
   let next = 0;
   try {
-    await Promise.all(Array.from({ length: Math.min(3, batches.length) }, async () => {
+    await Promise.all(Array.from({ length: Math.min(config.concurrency ?? 3, batches.length) }, async () => {
       while (next < batches.length) {
         combined.throwIfAborted();
         const batch = batches[next++];
@@ -238,7 +238,7 @@ export async function route(input, config, { discover = readCatalog, fetchImpl =
     if (!skills.length) {
       event.status = 'no_candidates';
     } else {
-      const scores = await evaluate(makeBatches(input.prompt, skills, config.model), config, signal, fetchImpl);
+      const scores = await evaluate(makeBatches(input.prompt, skills, config.model, config.batchBytes), config, signal, fetchImpl);
       const selected = skills.map((skill, index) => ({ name: skill.name, path: skill.path, probability: scores.get(index) }))
         .filter(skill => skill.probability >= config.threshold)
         .sort((a, b) => b.probability - a.probability || a.path.localeCompare(b.path))

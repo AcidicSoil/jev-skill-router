@@ -40,9 +40,12 @@ or any source checkout under `.runtime/selected-projects`.
 
 ```sh
 ./bin/jev-droid --help
+./bin/jev-droid models # configured profiles and native GGUF file presence
 ./bin/jev-droid list
 ./bin/jev-droid "Review the Python code and its regression tests"
-./bin/jev-droid serve # manually launch the configured local GGUF
+./bin/jev-droid --model julia "Review the Python code"
+./bin/jev-droid --model julia serve # manually launch this profile's GGUF
+./bin/jev-droid serve # manually launch the default local GGUF
 ```
 
 The installed command `~/.local/bin/jev-droid` points at `bin/jev-droid`.
@@ -76,15 +79,116 @@ hosted plugin's `config.json`. Example (replace paths with installed files):
 }
 ```
 
+Optional named profiles select additional installed models without changing
+the default Codex hook. Give each native profile its **own loopback port**.
+The default profile retains its existing `jev-droid-backend.service`; named
+native profiles start the same fork-owned CLI on demand and unload after the
+configured idle period. Their private diagnostics are stored under
+`~/.config/jev-skill-router/droid-leases/<name>/server.log`.
+
+```json
+{
+  "profiles": {
+    "julia": {
+      "endpoint": "http://127.0.0.1:18775",
+      "backend": {
+        "runtime": "native",
+        "model": "/path/to/another-decision-model.gguf",
+        "auto_start": true,
+        "ctx_size": 4096
+      },
+      "settings": {
+        "batchBytes": 5000,
+        "concurrency": 1,
+        "timeoutMs": 90000
+      }
+    },
+    "adapter": {
+      "endpoint": "http://127.0.0.1:18778",
+      "backend": {
+        "runtime": "gateway",
+        "model_id": "served-model-id",
+        "auto_start": false
+      }
+    }
+  }
+}
+```
+
+Add `profiles` to the existing schema-1 configuration, keeping `endpoint`,
+`backend`, and `settings` at the root for the default. Run
+`jev-droid models` to list these configured profiles without starting models;
+`modelPresent` means the native file exists, **not** that its inference protocol
+has passed. Select one with `--model NAME`, or set `JEV_DROID_PROFILE=NAME`
+for an existing Codex hook. Each profile can override shared `settings`.
+`batchBytes` (2,000–60,000) and `concurrency` (1–3) bound requests for
+models with smaller contexts.
+
 The model identity comes from `GET /v1/models` and is checked with a real
-`POST /v1/systemone` Noul probe before routing. Skill eligibility, batching,
-threshold, and selection use the existing fork router implementation. No
-remote requests, upstream checkout patches, or skill shortlisting are added.
+`POST /v1/systemone` Noul probe before routing. For multi-model servers,
+`model_id` identifies the exact model to request. A gateway profile connects to an already running loopback System One service
+without starting it. For owned third-party decision engines, use a `managed`
+profile. It accepts an absolute `command`, argument array, optional `env`
+map, and `model_id`; the fork appends `--port` and the profile endpoint's port.
+The same lease-based startup and idle-unload logic applies to managed engines.
+
+The included `scripts/serve-systemone.sh` manages the model and adapter as one
+process. Its args are `[kind, gguf, llama_port, model_directory_or_id]`:
+`startlux` uses an already-installed `startlux-decide` engine and tokenizer
+directory, and `intern` uses the separately installed Intern-Decision
+compatibility adapter provided by Jev Local Bridge. Only these installed
+adapters need their optional dependencies; other profiles do not. The script
+requires `llama-server` and `curl` and accepts explicit paths through
+`JEV_LLAMA_BIN`, `JEV_STARTLUX_BIN`, `JEV_INTERN_PYTHON` and `JEV_INTERN_SRC`.
+Each managed profile uses separate, unused loopback API and llama.cpp ports.
+
+The same runner supports `staged` for a large native System One GGUF on a
+slow or incompatible mounted filesystem. This mode accepts
+`["staged", "/absolute/path/to/model.gguf"]`, starts standalone llama.cpp
+on the profile endpoint's port, and removes its private `/dev/shm` copy on
+shutdown. It verifies free RAM before staging, requires at least the model
+size plus 3 GiB available, and uses 1 MiB streaming reads. Startup can take
+minutes for large Windows-mounted files; set `startup_timeout_seconds` to
+cover staging, and configure `load_mode: "mmap"`, `no_warmup: true`,
+`fit: "off"` when required by the installed runtime. This is **not**
+persistent model caching or an LM Studio integration. Clef Flash was tested
+with standalone llama.cpp using this method.
+
+```json
+{
+  "profiles": {
+    "startlux": {
+      "endpoint": "http://127.0.0.1:18779",
+      "backend": {
+        "runtime": "managed",
+        "command": "/path/to/jev-skill-router/scripts/serve-systemone.sh",
+        "args": ["startlux", "/path/to/StartLux.gguf", "18778", "/path/to/model/tokenizer"],
+        "model_id": "startlux-v1-4b",
+        "auto_start": true,
+        "idle_timeout_seconds": 60,
+        "env": {
+          "JEV_STARTLUX_BIN": "/path/to/startlux-decide",
+          "JEV_LLAMA_BIN": "/path/to/llama-server",
+          "JEV_MODEL_ID": "startlux-v1-4b"
+        }
+      },
+      "settings": { "batchBytes": 6000, "concurrency": 1 }
+    }
+  }
+}
+```
+
+When a managed adapter has no OpenAI-style `GET /v1/models` endpoint,
+the configured `model_id` is used directly and **must match** the model
+returned by a real System One Noul probe. Native GGUFs without this protocol
+are never accepted based on their filename. All endpoints remain local HTTP
+loopback. Skill eligibility, batching and selection use the existing full
+Codex catalog.
 
 ## Install
 
 ```sh
-codex plugin marketplace add https://github.com/droid-Q/jev-skill-router.git
+codex plugin marketplace add https://github.com/AcidicSoil/jev-skill-router.git
 codex plugin add jev-skill-router@jev-skill-router
 ```
 

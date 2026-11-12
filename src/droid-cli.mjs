@@ -1,12 +1,16 @@
 import { readCatalog, eligibleSkills } from './router.mjs';
-import { loadDroidConfig, runDroidEvent, serveNative } from './local-droid.mjs';
+import { basename } from 'node:path';
+import { listDroidProfiles, loadDroidConfig, resolveNativeModel, runDroidEvent, serveNative } from './local-droid.mjs';
 
 const usage = `jev-droid — local Droid-Q skill routing
 
 Usage:
+  jev-droid models            List configured model profiles without loading models
   jev-droid list              List eligible Codex skills without loading a model
   jev-droid "task description" Recommend skills using the configured local model
-  jev-droid serve             Serve the configured local GGUF with idle unload
+  jev-droid --model NAME "task description"  Route using a named model profile
+  jev-droid --model NAME serve               Serve its local GGUF with idle unload
+  jev-droid serve             Serve the default local GGUF with idle unload
   jev-droid --help            Show this help
 
 Without arguments, reads a Codex UserPromptSubmit hook event on stdin.
@@ -23,42 +27,82 @@ async function readEvent() {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
-async function main(args) {
-  if (args.length === 1 && ['--help', '-h'].includes(args[0])) {
-    process.stdout.write(usage + '\n');
-    return;
+function parseNamedCommand(args) {
+  if (args.length !== 3 || !args[1]?.trim() || args[2] === 'models') {
+    throw new Error('JEV_DROID_ARGUMENT_INVALID');
   }
+  return { action: args[2], profile: args[1] };
+}
+
+function parseCommand(args) {
+  if (args[0] === '--model') return parseNamedCommand(args);
   if (args.length > 1) throw new Error('JEV_DROID_ARGUMENT_INVALID');
-  const config = await loadDroidConfig();
-  if (args[0] === 'serve') {
-    process.exitCode = await serveNative(config);
-    return;
-  }
-  if (args[0] === 'list') {
-    const catalog = await readCatalog(process.cwd(), {
-      codexBin: config.settings.codexBin,
-      signal: AbortSignal.timeout(config.settings.timeoutMs),
-    });
-    const skills = await eligibleSkills(catalog);
-    process.stdout.write(JSON.stringify({
-      apiKeyConfigured: true,
-      catalogCount: catalog.skills.length,
-      candidateCount: skills.length,
-      catalogErrors: catalog.errors?.length ?? 0,
-      skills: skills.map(({ name, path }) => ({ name, path })),
-    }) + '\n');
-    return;
-  }
-  if (args.length && !args[0].trim()) throw new Error('JEV_DROID_ARGUMENT_INVALID');
-  const input = args.length
-    ? { hook_event_name: 'UserPromptSubmit', cwd: process.cwd(), prompt: args[0] }
-    : await readEvent();
+  return { action: args[0], profile: undefined };
+}
+
+async function printProfiles() {
+  const names = await listDroidProfiles();
+  const profiles = await Promise.all(names.map(async name => {
+    const config = await loadDroidConfig(undefined, name);
+    const modelPath = config.backend.runtime === 'native' ? config.backend.model :
+      config.backend.runtime === 'managed' && config.backend.args[0] === 'staged'
+        ? config.backend.args[1] : null;
+    let modelPresent = null;
+    if (modelPath) {
+      try { await resolveNativeModel(modelPath); modelPresent = true; }
+      catch { modelPresent = false; }
+    }
+    return {
+      name, runtime: config.backend.runtime, endpoint: config.endpoint,
+      model: modelPath ? basename(modelPath) : config.backend.model_id ?? null,
+      modelPresent, autoStart: !!config.backend.auto_start,
+    };
+  }));
+  process.stdout.write(JSON.stringify({ profiles }) + '\n');
+}
+
+async function printSkills(config) {
+  const catalog = await readCatalog(process.cwd(), {
+    codexBin: config.settings.codexBin,
+    signal: AbortSignal.timeout(config.settings.timeoutMs),
+  });
+  const skills = await eligibleSkills(catalog);
+  process.stdout.write(JSON.stringify({
+    apiKeyConfigured: true,
+    catalogCount: catalog.skills.length,
+    candidateCount: skills.length,
+    catalogErrors: catalog.errors?.length ?? 0,
+    skills: skills.map(({ name, path }) => ({ name, path })),
+  }) + '\n');
+}
+
+async function routeCommand(action, config) {
+  if (action !== undefined && !action.trim()) throw new Error('JEV_DROID_ARGUMENT_INVALID');
+  const input = action === undefined
+    ? await readEvent()
+    : { hook_event_name: 'UserPromptSubmit', cwd: process.cwd(), prompt: action };
   if (input?.hook_event_name !== 'UserPromptSubmit') {
     process.stdout.write('{}\n');
     return;
   }
   const result = await runDroidEvent(input, config);
   process.stdout.write(JSON.stringify(result) + '\n');
+}
+
+async function main(args) {
+  if (args.length === 1 && ['--help', '-h'].includes(args[0])) {
+    process.stdout.write(usage + '\n');
+    return;
+  }
+  const { action, profile } = parseCommand(args);
+  if (action === 'models') return printProfiles();
+  const config = await loadDroidConfig(undefined, profile);
+  if (action === 'list') return printSkills(config);
+  if (action === 'serve') {
+    process.exitCode = await serveNative(config);
+    return;
+  }
+  return routeCommand(action, config);
 }
 
 const hookMode = process.argv.length === 2;
