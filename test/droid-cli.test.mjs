@@ -97,12 +97,25 @@ createInterface({input:process.stdin}).on('line', line => {
     assert.equal(profiles.profiles[0].modelPresent, false);
     assert.equal(profiles.profiles[2].model, 'clef.gguf');
     assert.equal(profiles.profiles[2].modelPresent, true);
-    const shorthand = await run(process.execPath, [cmd, 'clef'], { cwd: root, env });
+    const oneShot = await run(process.execPath,
+      [cmd, 'remote', 'Test the project'], { cwd: root, env });
+    assert.match(JSON.parse(oneShot.stdout).hookSpecificOutput.additionalContext, /my-skill/);
+    const unmodified = JSON.parse((await run(process.execPath,
+      [cmd, 'models'], { cwd: root, env })).stdout);
+    assert.equal(unmodified.profiles.find(profile => profile.name === 'default').active, true);
+    const naturalWords = await run(process.execPath,
+      [cmd, 'remote', 'Test', 'the', 'project'], { cwd: root, env });
+    assert.match(JSON.parse(naturalWords.stdout).hookSpecificOutput.additionalContext, /my-skill/);
+    const shorthand = await run(process.execPath, [cmd, 'remote'], { cwd: root, env });
+    assert.match(shorthand.stdout, /selected.*remote/i);
+    const active = JSON.parse((await run(process.execPath, [cmd, 'models'], { cwd: root, env })).stdout);
+    assert.equal(active.profiles.find(profile => profile.name === 'remote').active, true);
     const explicitServe = await run(process.execPath,
       [cmd, '--model', 'clef', 'serve'], { cwd: root, env });
-    const stagedCommand = /^staged .*clef[.]gguf --port [0-9]+/;
-    assert.match(explicitServe.stdout, stagedCommand);
-    assert.match(shorthand.stdout, stagedCommand);
+    assert.match(explicitServe.stdout, /^staged .*clef[.]gguf --port [0-9]+/);
+    const selectedWithoutFlag = await run(process.execPath,
+      [cmd, 'Test the project'], { cwd: root, env });
+    assert.match(JSON.parse(selectedWithoutFlag.stdout).hookSpecificOutput.additionalContext, /my-skill/);
     const named = await run(process.execPath,
       [cmd, '--model', 'remote', 'Test the project'], { cwd: root, env });
     const selected = JSON.parse(named.stdout);
@@ -113,6 +126,22 @@ createInterface({input:process.stdin}).on('line', line => {
     const singleWordTask = await run(process.execPath, [cmd, 'Test'],
       { cwd: root, env: { ...env, JEV_DROID_PROFILE: 'remote' } });
     assert.match(JSON.parse(singleWordTask.stdout).hookSpecificOutput.additionalContext, /my-skill/);
+    const hooked = await new Promise((done, reject) => {
+      const child = spawn(process.execPath, [cmd], { cwd: root, env, stdio: ['pipe', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', chunk => { stdout += chunk; });
+      child.stderr.on('data', chunk => { stderr += chunk; });
+      child.once('error', reject);
+      child.once('exit', code => code === 0 ? done(stdout) : reject(new Error(stderr)));
+      child.stdin.end(JSON.stringify({ hook_event_name: 'UserPromptSubmit',
+        cwd: root, prompt: 'Test the project' }));
+    });
+    assert.match(JSON.parse(hooked).hookSpecificOutput.additionalContext, /my-skill/);
+    const reset = await run(process.execPath, [cmd, 'default'], { cwd: root, env });
+    assert.match(reset.stdout, /default/);
+    const afterReset = JSON.parse((await run(process.execPath, [cmd, 'models'], { cwd: root, env })).stdout);
+    assert.equal(afterReset.profiles.find(profile => profile.name === 'default').active, true);
     await assert.rejects(run(process.execPath,
       [cmd, '--model', 'missing', 'Test the project'], { cwd: root, env }),
       /JEV_DROID_PROFILE_UNKNOWN/);

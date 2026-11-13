@@ -7857,8 +7857,8 @@ import { basename as basename2 } from "node:path";
 
 // src/local-droid.mjs
 import { spawn as spawn2 } from "node:child_process";
-import { randomUUID as randomUUID2 } from "node:crypto";
-import { mkdir as mkdir2, open, readdir as readdir3, rm, stat as stat3, writeFile } from "node:fs/promises";
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { mkdir as mkdir2, open, readdir as readdir3, rm as rm2, stat as stat3, writeFile as writeFile2 } from "node:fs/promises";
 import { join as join4 } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -7936,10 +7936,12 @@ async function startModelProxy(endpoint) {
 }
 
 // src/droid-config.mjs
-import { readFile as readFile3, readdir as readdir2, realpath as realpath2, stat as stat2 } from "node:fs/promises";
+import { readFile as readFile3, readdir as readdir2, realpath as realpath2, rename, rm, stat as stat2, writeFile } from "node:fs/promises";
+import { randomUUID as randomUUID2 } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname as dirname2, isAbsolute as isAbsolute3, join as join3, resolve as resolve2 } from "node:path";
 var defaultFile = () => process.env.JEV_DROID_CONFIG || join3(homedir(), ".config", "jev-skill-router", "droid.json");
+var selectedProfileFile = (file) => join3(dirname2(file), "active-profile");
 var limits = {
   idle_timeout_seconds: [1, 3600],
   startup_timeout_seconds: [1, 300],
@@ -8064,16 +8066,35 @@ async function listDroidProfiles(file = defaultFile()) {
   }
   return ["default", ...names];
 }
-async function loadDroidConfig(file = defaultFile(), profile = process.env.JEV_DROID_PROFILE || "default") {
+async function persistedProfile(file) {
+  try {
+    return (await readFile3(selectedProfileFile(file), "utf8")).trim();
+  } catch (error) {
+    if (error.code === "ENOENT") return "default";
+    throw fail("JEV_DROID_PROFILE_INVALID");
+  }
+}
+async function selectDroidProfile(profile, file = defaultFile()) {
+  await loadDroidConfig(file, profile);
+  const temporary = selectedProfileFile(file) + "." + randomUUID2();
+  try {
+    await writeFile(temporary, profile + "\n", { flag: "wx", mode: 384 });
+    await rename(temporary, selectedProfileFile(file));
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+async function loadDroidConfig(file = defaultFile(), profile) {
   const raw = await readConfig(file);
-  const selected = selectProfile(raw, profile);
+  const name = profile ?? process.env.JEV_DROID_PROFILE ?? await persistedProfile(file);
+  const selected = selectProfile(raw, name);
   return {
     file,
-    profile,
+    profile: name,
     endpoint: loopbackEndpoint(selected.endpoint),
-    backend: normalizeBackend(selected.backend, file, profile),
-    settings: normalizeSettings({ ...raw.settings, ...profile === "default" ? {} : selected.settings }),
-    leaseDir: join3(dirname2(file), "droid-leases", ...profile === "default" ? [] : [profile])
+    backend: normalizeBackend(selected.backend, file, name),
+    settings: normalizeSettings({ ...raw.settings, ...name === "default" ? {} : selected.settings }),
+    leaseDir: join3(dirname2(file), "droid-leases", ...name === "default" ? [] : [name])
   };
 }
 async function isRegularFile(path) {
@@ -8282,13 +8303,13 @@ async function ensureDecisionBackend(config, fetchImpl = fetch) {
 }
 async function withLease(dir, run2) {
   await mkdir2(dir, { recursive: true, mode: 448 });
-  const file = join4(dir, String(process.pid) + "-" + randomUUID2());
-  await writeFile(file, "", { mode: 384, flag: "wx" });
+  const file = join4(dir, String(process.pid) + "-" + randomUUID3());
+  await writeFile2(file, "", { mode: 384, flag: "wx" });
   try {
     return await run2();
   } finally {
-    await rm(file);
-    await writeFile(join4(dir, "activity"), String(Date.now()), { mode: 384 });
+    await rm2(file);
+    await writeFile2(join4(dir, "activity"), String(Date.now()), { mode: 384 });
   }
 }
 function runDroidEvent(input, config, dependencies = {}) {
@@ -8361,7 +8382,7 @@ async function serveNative(config) {
   try {
     const [binary, args] = await ownedBackendCommand(config, proxy.endpoint);
     await mkdir2(config.leaseDir, { recursive: true, mode: 448 });
-    await writeFile(join4(config.leaseDir, "activity"), String(Date.now()), { mode: 384 });
+    await writeFile2(join4(config.leaseDir, "activity"), String(Date.now()), { mode: 384 });
     const child = spawn2(binary, args, {
       stdio: "inherit",
       env: ownedBackendEnvironment(config)
@@ -8405,9 +8426,10 @@ var usage = `jev-droid \u2014 local Droid-Q skill routing
 Usage:
   jev-droid models            List configured model profiles without loading models
   jev-droid list              List eligible Codex skills without loading a model
-  jev-droid "task description" Recommend skills using the configured local model
-  jev-droid NAME                             Serve a configured model profile
-  jev-droid --model NAME "task description"  Route using a named model profile
+  jev-droid "task description" Recommend skills using the active model
+  jev-droid NAME "task description"          Route this query through NAME
+  jev-droid NAME                             Select NAME for future queries and hooks
+  jev-droid --model NAME "task description"  Explicit one-query model override
   jev-droid --model NAME serve               Serve its local GGUF with idle unload
   jev-droid serve             Serve the default local GGUF with idle unload
   jev-droid --help            Show this help
@@ -8432,15 +8454,21 @@ function parseNamedCommand(args) {
 }
 async function parseCommand(args) {
   if (args[0] === "--model") return parseNamedCommand(args);
-  if (args.length > 1) throw new Error("JEV_DROID_ARGUMENT_INVALID");
+  if (args.length > 1) {
+    if (!(await listDroidProfiles()).includes(args[0])) {
+      throw new Error("JEV_DROID_ARGUMENT_INVALID");
+    }
+    return { action: args.slice(1).join(" "), profile: args[0] };
+  }
   const action = args[0];
   if (action && !["models", "list", "serve"].includes(action) && (await listDroidProfiles()).includes(action)) {
-    return { action: "serve", profile: action };
+    return { action: "select", profile: action };
   }
   return { action, profile: void 0 };
 }
 async function printProfiles() {
   const names = await listDroidProfiles();
+  const active = (await loadDroidConfig()).profile;
   const profiles = await Promise.all(names.map(async (name) => {
     const config = await loadDroidConfig(void 0, name);
     const modelPath = config.backend.runtime === "native" ? config.backend.model : config.backend.runtime === "managed" && config.backend.args[0] === "staged" ? config.backend.args[1] : null;
@@ -8455,6 +8483,7 @@ async function printProfiles() {
     }
     return {
       name,
+      active: name === active,
       runtime: config.backend.runtime,
       endpoint: config.endpoint,
       model: modelPath ? basename2(modelPath) : config.backend.model_id ?? null,
@@ -8488,6 +8517,23 @@ async function routeCommand(action, config) {
   const result = await runDroidEvent(input, config);
   process.stdout.write(JSON.stringify(result) + "\n");
 }
+async function runConfiguredCommand(action, profile) {
+  if (action === "select") {
+    await selectDroidProfile(profile);
+    process.stdout.write("Selected model profile: " + profile + "\n");
+    return;
+  }
+  const config = await loadDroidConfig(
+    void 0,
+    action === "serve" && !profile ? "default" : profile
+  );
+  if (action === "list") return printSkills(config);
+  if (action === "serve") {
+    process.exitCode = await serveNative(config);
+    return;
+  }
+  return routeCommand(action, config);
+}
 async function main(args) {
   if (args.length === 1 && ["--help", "-h"].includes(args[0])) {
     process.stdout.write(usage + "\n");
@@ -8495,13 +8541,7 @@ async function main(args) {
   }
   const { action, profile } = await parseCommand(args);
   if (action === "models") return printProfiles();
-  const config = await loadDroidConfig(void 0, profile);
-  if (action === "list") return printSkills(config);
-  if (action === "serve") {
-    process.exitCode = await serveNative(config);
-    return;
-  }
-  return routeCommand(action, config);
+  return runConfiguredCommand(action, profile);
 }
 var hookMode = process.argv.length === 2;
 main(process.argv.slice(2)).catch((error) => {

@@ -1,10 +1,12 @@
-import { readFile, readdir, realpath, stat } from 'node:fs/promises';
+import { readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { fail, isObject } from './validation.mjs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 const defaultFile = () => process.env.JEV_DROID_CONFIG ||
   join(homedir(), '.config', 'jev-skill-router', 'droid.json');
+const selectedProfileFile = file => join(dirname(file), 'active-profile');
 const limits = {
   idle_timeout_seconds: [1, 3600],
   startup_timeout_seconds: [1, 300],
@@ -144,15 +146,35 @@ export async function listDroidProfiles(file = defaultFile()) {
   return ['default', ...names];
 }
 
-export async function loadDroidConfig(file = defaultFile(), profile = process.env.JEV_DROID_PROFILE || 'default') {
+async function persistedProfile(file) {
+  try { return (await readFile(selectedProfileFile(file), 'utf8')).trim(); }
+  catch (error) {
+    if (error.code === 'ENOENT') return 'default';
+    throw fail('JEV_DROID_PROFILE_INVALID');
+  }
+}
+
+export async function selectDroidProfile(profile, file = defaultFile()) {
+  await loadDroidConfig(file, profile);
+  const temporary = selectedProfileFile(file) + '.' + randomUUID();
+  try {
+    await writeFile(temporary, profile + '\n', { flag: 'wx', mode: 0o600 });
+    await rename(temporary, selectedProfileFile(file));
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+
+export async function loadDroidConfig(file = defaultFile(), profile) {
   const raw = await readConfig(file);
-  const selected = selectProfile(raw, profile);
+  const name = profile ?? process.env.JEV_DROID_PROFILE ?? await persistedProfile(file);
+  const selected = selectProfile(raw, name);
   return {
-    file, profile,
+    file, profile: name,
     endpoint: loopbackEndpoint(selected.endpoint),
-    backend: normalizeBackend(selected.backend, file, profile),
-    settings: normalizeSettings({ ...raw.settings, ...(profile === 'default' ? {} : selected.settings) }),
-    leaseDir: join(dirname(file), 'droid-leases', ...(profile === 'default' ? [] : [profile])),
+    backend: normalizeBackend(selected.backend, file, name),
+    settings: normalizeSettings({ ...raw.settings, ...(name === 'default' ? {} : selected.settings) }),
+    leaseDir: join(dirname(file), 'droid-leases', ...(name === 'default' ? [] : [name])),
   };
 }
 

@@ -43,17 +43,26 @@ or any source checkout under `.runtime/selected-projects`.
 ./bin/jev-droid models # configured profiles and native GGUF file presence
 ./bin/jev-droid list
 ./bin/jev-droid "Review the Python code and its regression tests"
-./bin/jev-droid --model julia "Review the Python code"
-./bin/jev-droid julia # shorthand: launch Julia's model server
-./bin/jev-droid --model julia serve # explicit equivalent
-./bin/jev-droid serve # manually launch the default local GGUF
+./bin/jev-droid julia "Review the Python code" # one query through Julia
+./bin/jev-droid julia # select Julia for subsequent prompts and Codex hooks
+./bin/jev-droid "Review the Python code" # now routes through Julia
+./bin/jev-droid default # restore the default selected profile
+./bin/jev-droid --model julia serve # manually serve Julia without selecting it
+./bin/jev-droid serve # manually serve the root default model
 ```
 
 The installed command `~/.local/bin/jev-droid` points at `bin/jev-droid`.
-A single argument matching a configured profile (for example, `jev-droid julia`)
-starts its server exactly like `--model julia serve`; it does **not** change
-the default profile for hooks or future requests. Other one-word arguments
-remain normal task descriptions. Press Ctrl+C to stop a manually served model.
+A single configured profile name (for example, `jev-droid julia`) **selects**
+that model persistently for subsequent queries and Codex hooks. The active
+selection is stored next to `droid.json` in the private `active-profile` file;
+`jev-droid models` marks it with `active: true`. Use `jev-droid default` to
+switch back. `JEV_DROID_PROFILE` can override the selection per process.
+
+`jev-droid julia "Review the Python code"` routes **only that query** using
+Julia, without changing the active selection. The query can also be multiple
+unquoted words. `--model NAME "task"` remains supported. To start a
+server directly, use `jev-droid --model NAME serve`. Other one-word
+arguments remain task descriptions.
 The existing Codex `UserPromptSubmit` hook uses the same command with JSON
 on stdin. Listing skills does not start a model. A routing query may start the
 owned `jev-droid-backend.service` and holds a lease until completion.
@@ -132,8 +141,10 @@ Add `profiles` to the existing schema-1 configuration, keeping `endpoint`,
 `backend`, and `settings` at the root for the default. Run
 `jev-droid models` to list these configured profiles without starting models;
 `modelPresent` means the native file exists, **not** that its inference protocol
-has passed. Select one with `--model NAME`, or set `JEV_DROID_PROFILE=NAME`
-for an existing Codex hook. Each profile can override shared `settings`.
+has passed. Route a query with `jev-droid NAME "task"` or `--model NAME "task"`.
+Choose the persistent active profile with `jev-droid NAME`; Codex hooks use
+that selection automatically. `JEV_DROID_PROFILE=NAME` overrides the active
+selection for an individual process. Each profile can override shared `settings`.
 `batchBytes` (2,000–60,000) and `concurrency` (1–3) bound requests for
 models with smaller contexts.
 
