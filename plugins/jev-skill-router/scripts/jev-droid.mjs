@@ -7712,7 +7712,7 @@ function makeBatches(prompt, skills, model, batchBytes = 6e4) {
   const stateBytes = Buffer.byteLength(JSON.stringify(state));
   if (stateBytes > 24e3) throw fail("JEV_PROMPT_TOO_LARGE");
   const batches = [];
-  let request = { model, state, questions: {} };
+  let request2 = { model, state, questions: {} };
   for (let index = 0; index < skills.length; index++) {
     const skill = skills[index];
     const question = {
@@ -7725,15 +7725,15 @@ function makeBatches(prompt, skills, model, batchBytes = 6e4) {
     };
     if (stateBytes + Buffer.byteLength(JSON.stringify(question)) > 3e4) throw fail("JEV_QUESTION_TOO_LARGE");
     const id = `s${index}`;
-    request.questions[id] = question;
-    if (Buffer.byteLength(JSON.stringify(request)) > batchBytes) {
-      delete request.questions[id];
-      if (!Object.keys(request.questions).length) throw fail("JEV_QUESTION_TOO_LARGE");
-      batches.push(request);
-      request = { model, state, questions: { [id]: question } };
+    request2.questions[id] = question;
+    if (Buffer.byteLength(JSON.stringify(request2)) > batchBytes) {
+      delete request2.questions[id];
+      if (!Object.keys(request2.questions).length) throw fail("JEV_QUESTION_TOO_LARGE");
+      batches.push(request2);
+      request2 = { model, state, questions: { [id]: question } };
     }
   }
-  if (Object.keys(request.questions).length) batches.push(request);
+  if (Object.keys(request2.questions).length) batches.push(request2);
   return batches;
 }
 async function boundedText(stream, limit) {
@@ -7861,6 +7861,79 @@ import { randomUUID as randomUUID2 } from "node:crypto";
 import { mkdir as mkdir2, open, readdir as readdir3, rm, stat as stat3, writeFile } from "node:fs/promises";
 import { join as join4 } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+
+// src/model-proxy.mjs
+import { createServer as createHttpServer, request } from "node:http";
+import { createServer as createTcpServer } from "node:net";
+async function unusedPort() {
+  const socket = createTcpServer();
+  await new Promise((done, reject) => {
+    socket.once("error", reject);
+    socket.listen(0, "127.0.0.1", done);
+  });
+  const port = socket.address().port;
+  await new Promise((done) => socket.close(done));
+  return port;
+}
+function forward(req, res, port) {
+  const upstream = request({
+    host: "127.0.0.1",
+    port,
+    method: req.method,
+    path: req.url,
+    headers: { ...req.headers, host: "127.0.0.1:" + port }
+  }, (reply) => {
+    res.writeHead(reply.statusCode, reply.headers);
+    reply.pipe(res);
+  });
+  upstream.on("error", () => {
+    if (!res.headersSent) res.writeHead(502);
+    res.end();
+  });
+  req.on("aborted", () => upstream.destroy());
+  req.pipe(upstream);
+}
+async function startModelProxy(endpoint) {
+  const publicUrl = new URL(endpoint);
+  const backendPort = await unusedPort();
+  let active = 0;
+  let lastResponseAt = Date.now();
+  const server = createHttpServer((req, res) => {
+    const path = req.url.split("?")[0];
+    const inference = !["/health", "/healthz", "/v1/models"].includes(path);
+    if (inference) active++;
+    let finished = false;
+    const release = () => {
+      if (finished) return;
+      finished = true;
+      if (inference) {
+        active--;
+        lastResponseAt = Date.now();
+      }
+    };
+    res.once("finish", release);
+    res.once("close", release);
+    forward(req, res, backendPort);
+  });
+  await new Promise((done, reject) => {
+    server.once("error", reject);
+    server.listen(
+      Number(publicUrl.port),
+      publicUrl.hostname === "[::1]" ? "::1" : publicUrl.hostname,
+      done
+    );
+  });
+  const upstream = new URL(endpoint);
+  upstream.port = String(backendPort);
+  return {
+    endpoint: upstream.origin,
+    active: () => active,
+    lastResponseAt: () => lastResponseAt,
+    close: () => new Promise((done, reject) => {
+      server.close((error) => error ? reject(error) : done());
+    })
+  };
+}
 
 // src/droid-config.mjs
 import { readFile as readFile3, readdir as readdir2, realpath as realpath2, stat as stat2 } from "node:fs/promises";
@@ -8102,7 +8175,7 @@ async function probeDecision(config, fetchImpl = fetch) {
       await getJson(config.endpoint + "/v1/models", { signal }, fetchImpl),
       config.backend.model_id
     );
-    const request = {
+    const request2 = {
       model,
       state: { purpose: "protocol compatibility check" },
       questions: { probe: {
@@ -8115,7 +8188,7 @@ async function probeDecision(config, fetchImpl = fetch) {
       method: "POST",
       signal,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(request)
+      body: JSON.stringify(request2)
     }, fetchImpl);
     if (!(validProbeModel(answer, model, config.backend) && validProbeScore(answer?.answers?.probe))) {
       throw fail("JEV_DROID_DECISION_INVALID");
@@ -8136,6 +8209,14 @@ async function healthy(config, fetchImpl = fetch) {
   } catch {
     return false;
   }
+}
+async function waitForReady(endpoint, timeoutMs, isAlive, fetchImpl = fetch) {
+  const deadline = Date.now() + timeoutMs;
+  while (isAlive() && Date.now() < deadline) {
+    if (await healthy({ endpoint }, fetchImpl)) return Date.now();
+    await sleep(500);
+  }
+  return 0;
 }
 async function startOwnedBackend(config) {
   if (config.backend.start === "systemd") {
@@ -8181,12 +8262,12 @@ function requireRunningChild(pid) {
   }
 }
 async function awaitNativeReady(config, fetchImpl, childPid) {
-  const until = Date.now() + (config.backend.startup_timeout_seconds ?? 120) * 1e3;
-  while (Date.now() < until && !await healthy(config, fetchImpl)) {
+  const timeoutMs = (config.backend.startup_timeout_seconds ?? 120) * 1e3;
+  const ready = await waitForReady(config.endpoint, timeoutMs, () => {
     requireRunningChild(childPid);
-    await sleep(500);
-  }
-  if (!await healthy(config, fetchImpl)) throw fail("JEV_DROID_BACKEND_UNAVAILABLE");
+    return true;
+  }, fetchImpl);
+  if (!ready) throw fail("JEV_DROID_BACKEND_UNAVAILABLE");
 }
 async function ensureDecisionBackend(config, fetchImpl = fetch) {
   if (config.backend.runtime === "gateway") return probeDecision(config, fetchImpl);
@@ -8246,9 +8327,9 @@ async function lastActivity(dir) {
     return Date.now();
   }
 }
-async function ownedBackendCommand(config) {
+async function ownedBackendCommand(config, endpoint = config.endpoint) {
   const model = config.backend.runtime === "native" ? await resolveNativeModel(config.backend.model) : void 0;
-  return backendCommand(config, model);
+  return backendCommand({ ...config, endpoint }, model);
 }
 function ownedBackendEnvironment(config) {
   return {
@@ -8262,39 +8343,59 @@ function ownedBackendEnvironment(config) {
     ...config.backend.gpu_layers !== void 0 ? { JEV_LLAMA_GPU_LAYERS: String(config.backend.gpu_layers) } : {}
   };
 }
+async function waitForIdle(config, proxy, readyAt, isAlive) {
+  const timeout = (config.backend.idle_timeout_seconds ?? 60) * 1e3;
+  while (isAlive()) {
+    await sleep(500);
+    if (proxy.active() || await hasActiveLeases(config.leaseDir)) continue;
+    const latest = Math.max(
+      readyAt,
+      proxy.lastResponseAt(),
+      await lastActivity(config.leaseDir)
+    );
+    if (Date.now() - latest >= timeout) return;
+  }
+}
 async function serveNative(config) {
-  const [binary, args] = await ownedBackendCommand(config);
-  await mkdir2(config.leaseDir, { recursive: true, mode: 448 });
-  await writeFile(join4(config.leaseDir, "activity"), String(Date.now()), { mode: 384 });
-  const child = spawn2(binary, args, {
-    stdio: "inherit",
-    env: ownedBackendEnvironment(config)
-  });
-  let exited = false;
-  let code = 0;
-  child.once("exit", (exitCode, signal) => {
-    exited = true;
-    code = signal ? 128 : exitCode ?? 1;
-  });
-  child.once("error", () => {
-    exited = true;
-    code = 127;
-  });
-  const stop = () => child.kill("SIGTERM");
-  process.on("SIGTERM", stop);
-  process.on("SIGINT", stop);
+  const proxy = await startModelProxy(config.endpoint);
   try {
-    const timeout = (config.backend.idle_timeout_seconds ?? 60) * 1e3;
-    while (!exited) {
-      await sleep(2e3);
-      if (!await hasActiveLeases(config.leaseDir) && Date.now() - await lastActivity(config.leaseDir) >= timeout) break;
+    const [binary, args] = await ownedBackendCommand(config, proxy.endpoint);
+    await mkdir2(config.leaseDir, { recursive: true, mode: 448 });
+    await writeFile(join4(config.leaseDir, "activity"), String(Date.now()), { mode: 384 });
+    const child = spawn2(binary, args, {
+      stdio: "inherit",
+      env: ownedBackendEnvironment(config)
+    });
+    let exited = false;
+    let code = 0;
+    child.once("exit", (exitCode, signal) => {
+      exited = true;
+      code = signal ? 128 : exitCode ?? 1;
+    });
+    child.once("error", () => {
+      exited = true;
+      code = 127;
+    });
+    const stop = () => child.kill("SIGTERM");
+    process.on("SIGTERM", stop);
+    process.on("SIGINT", stop);
+    try {
+      const readyAt = await waitForReady(
+        proxy.endpoint,
+        (config.backend.startup_timeout_seconds ?? 120) * 1e3,
+        () => !exited
+      );
+      if (readyAt) await waitForIdle(config, proxy, readyAt, () => !exited);
+      else if (!exited) code = 1;
+      return code;
+    } finally {
+      process.off("SIGTERM", stop);
+      process.off("SIGINT", stop);
+      if (!exited) child.kill("SIGTERM");
+      if (!exited) await new Promise((done) => child.once("exit", done));
     }
-    return code;
   } finally {
-    process.off("SIGTERM", stop);
-    process.off("SIGINT", stop);
-    if (!exited) child.kill("SIGTERM");
-    if (!exited) await new Promise((done) => child.once("exit", done));
+    await proxy.close();
   }
 }
 
@@ -8305,6 +8406,7 @@ Usage:
   jev-droid models            List configured model profiles without loading models
   jev-droid list              List eligible Codex skills without loading a model
   jev-droid "task description" Recommend skills using the configured local model
+  jev-droid NAME                             Serve a configured model profile
   jev-droid --model NAME "task description"  Route using a named model profile
   jev-droid --model NAME serve               Serve its local GGUF with idle unload
   jev-droid serve             Serve the default local GGUF with idle unload
@@ -8328,10 +8430,14 @@ function parseNamedCommand(args) {
   }
   return { action: args[2], profile: args[1] };
 }
-function parseCommand(args) {
+async function parseCommand(args) {
   if (args[0] === "--model") return parseNamedCommand(args);
   if (args.length > 1) throw new Error("JEV_DROID_ARGUMENT_INVALID");
-  return { action: args[0], profile: void 0 };
+  const action = args[0];
+  if (action && !["models", "list", "serve"].includes(action) && (await listDroidProfiles()).includes(action)) {
+    return { action: "serve", profile: action };
+  }
+  return { action, profile: void 0 };
 }
 async function printProfiles() {
   const names = await listDroidProfiles();
@@ -8387,7 +8493,7 @@ async function main(args) {
     process.stdout.write(usage + "\n");
     return;
   }
-  const { action, profile } = parseCommand(args);
+  const { action, profile } = await parseCommand(args);
   if (action === "models") return printProfiles();
   const config = await loadDroidConfig(void 0, profile);
   if (action === "list") return printSkills(config);

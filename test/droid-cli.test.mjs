@@ -97,6 +97,12 @@ createInterface({input:process.stdin}).on('line', line => {
     assert.equal(profiles.profiles[0].modelPresent, false);
     assert.equal(profiles.profiles[2].model, 'clef.gguf');
     assert.equal(profiles.profiles[2].modelPresent, true);
+    const shorthand = await run(process.execPath, [cmd, 'clef'], { cwd: root, env });
+    const explicitServe = await run(process.execPath,
+      [cmd, '--model', 'clef', 'serve'], { cwd: root, env });
+    const stagedCommand = /^staged .*clef[.]gguf --port [0-9]+/;
+    assert.match(explicitServe.stdout, stagedCommand);
+    assert.match(shorthand.stdout, stagedCommand);
     const named = await run(process.execPath,
       [cmd, '--model', 'remote', 'Test the project'], { cwd: root, env });
     const selected = JSON.parse(named.stdout);
@@ -104,6 +110,9 @@ createInterface({input:process.stdin}).on('line', line => {
     const envSelected = await run(process.execPath, [cmd, 'Test the project'],
       { cwd: root, env: { ...env, JEV_DROID_PROFILE: 'remote' } });
     assert.match(JSON.parse(envSelected.stdout).hookSpecificOutput.additionalContext, /my-skill/);
+    const singleWordTask = await run(process.execPath, [cmd, 'Test'],
+      { cwd: root, env: { ...env, JEV_DROID_PROFILE: 'remote' } });
+    assert.match(JSON.parse(singleWordTask.stdout).hookSpecificOutput.additionalContext, /my-skill/);
     await assert.rejects(run(process.execPath,
       [cmd, '--model', 'missing', 'Test the project'], { cwd: root, env }),
       /JEV_DROID_PROFILE_UNKNOWN/);

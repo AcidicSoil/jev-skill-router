@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { route } from './router.mjs';
 import { fail } from './validation.mjs';
+import { startModelProxy } from './model-proxy.mjs';
 import { backendCommand, listDroidProfiles, loadDroidConfig, resolveNativeModel } from './droid-config.mjs';
 
 export { backendCommand, listDroidProfiles, loadDroidConfig, resolveNativeModel };
@@ -76,6 +77,15 @@ async function healthy(config, fetchImpl = fetch) {
   } catch { return false; }
 }
 
+async function waitForReady(endpoint, timeoutMs, isAlive, fetchImpl = fetch) {
+  const deadline = Date.now() + timeoutMs;
+  while (isAlive() && Date.now() < deadline) {
+    if (await healthy({ endpoint }, fetchImpl)) return Date.now();
+    await sleep(500);
+  }
+  return 0;
+}
+
 async function startOwnedBackend(config) {
   if (config.backend.start === 'systemd') {
     const child = spawn('systemctl', ['--user', 'start', 'jev-droid-backend.service'],
@@ -110,12 +120,12 @@ function requireRunningChild(pid) {
 }
 
 async function awaitNativeReady(config, fetchImpl, childPid) {
-  const until = Date.now() + (config.backend.startup_timeout_seconds ?? 120) * 1000;
-  while (Date.now() < until && !await healthy(config, fetchImpl)) {
+  const timeoutMs = (config.backend.startup_timeout_seconds ?? 120) * 1000;
+  const ready = await waitForReady(config.endpoint, timeoutMs, () => {
     requireRunningChild(childPid);
-    await sleep(500);
-  }
-  if (!await healthy(config, fetchImpl)) throw fail('JEV_DROID_BACKEND_UNAVAILABLE');
+    return true;
+  }, fetchImpl);
+  if (!ready) throw fail('JEV_DROID_BACKEND_UNAVAILABLE');
 }
 
 export async function ensureDecisionBackend(config, fetchImpl = fetch) {
@@ -169,11 +179,11 @@ async function lastActivity(dir) {
   catch { return Date.now(); }
 }
 
-async function ownedBackendCommand(config) {
+async function ownedBackendCommand(config, endpoint = config.endpoint) {
   const model = config.backend.runtime === 'native'
     ? await resolveNativeModel(config.backend.model)
     : undefined;
-  return backendCommand(config, model);
+  return backendCommand({ ...config, endpoint }, model);
 }
 
 function ownedBackendEnvironment(config) {
@@ -188,35 +198,49 @@ function ownedBackendEnvironment(config) {
   };
 }
 
+async function waitForIdle(config, proxy, readyAt, isAlive) {
+  const timeout = (config.backend.idle_timeout_seconds ?? 60) * 1000;
+  while (isAlive()) {
+    await sleep(500);
+    if (proxy.active() || await hasActiveLeases(config.leaseDir)) continue;
+    const latest = Math.max(readyAt, proxy.lastResponseAt(),
+      await lastActivity(config.leaseDir));
+    if (Date.now() - latest >= timeout) return;
+  }
+}
+
 export async function serveNative(config) {
-  const [binary, args] = await ownedBackendCommand(config);
-  await mkdir(config.leaseDir, { recursive: true, mode: 0o700 });
-  await writeFile(join(config.leaseDir, 'activity'), String(Date.now()), { mode: 0o600 });
-  const child = spawn(binary, args, {
-    stdio: 'inherit', env: ownedBackendEnvironment(config),
-  });
-  let exited = false;
-  let code = 0;
-  child.once('exit', (exitCode, signal) => {
-    exited = true;
-    code = signal ? 128 : exitCode ?? 1;
-  });
-  child.once('error', () => { exited = true; code = 127; });
-  const stop = () => child.kill('SIGTERM');
-  process.on('SIGTERM', stop);
-  process.on('SIGINT', stop);
+  const proxy = await startModelProxy(config.endpoint);
   try {
-    const timeout = (config.backend.idle_timeout_seconds ?? 60) * 1000;
-    while (!exited) {
-      await sleep(2000);
-      if (!await hasActiveLeases(config.leaseDir) &&
-          Date.now() - await lastActivity(config.leaseDir) >= timeout) break;
+    const [binary, args] = await ownedBackendCommand(config, proxy.endpoint);
+    await mkdir(config.leaseDir, { recursive: true, mode: 0o700 });
+    await writeFile(join(config.leaseDir, 'activity'), String(Date.now()), { mode: 0o600 });
+    const child = spawn(binary, args, {
+      stdio: 'inherit', env: ownedBackendEnvironment(config),
+    });
+    let exited = false;
+    let code = 0;
+    child.once('exit', (exitCode, signal) => {
+      exited = true;
+      code = signal ? 128 : exitCode ?? 1;
+    });
+    child.once('error', () => { exited = true; code = 127; });
+    const stop = () => child.kill('SIGTERM');
+    process.on('SIGTERM', stop);
+    process.on('SIGINT', stop);
+    try {
+      const readyAt = await waitForReady(proxy.endpoint,
+        (config.backend.startup_timeout_seconds ?? 120) * 1000, () => !exited);
+      if (readyAt) await waitForIdle(config, proxy, readyAt, () => !exited);
+      else if (!exited) code = 1;
+      return code;
+    } finally {
+      process.off('SIGTERM', stop);
+      process.off('SIGINT', stop);
+      if (!exited) child.kill('SIGTERM');
+      if (!exited) await new Promise(done => child.once('exit', done));
     }
-    return code;
   } finally {
-    process.off('SIGTERM', stop);
-    process.off('SIGINT', stop);
-    if (!exited) child.kill('SIGTERM');
-    if (!exited) await new Promise(done => child.once('exit', done));
+    await proxy.close();
   }
 }

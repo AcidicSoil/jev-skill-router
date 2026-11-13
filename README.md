@@ -44,15 +44,28 @@ or any source checkout under `.runtime/selected-projects`.
 ./bin/jev-droid list
 ./bin/jev-droid "Review the Python code and its regression tests"
 ./bin/jev-droid --model julia "Review the Python code"
-./bin/jev-droid --model julia serve # manually launch this profile's GGUF
+./bin/jev-droid julia # shorthand: launch Julia's model server
+./bin/jev-droid --model julia serve # explicit equivalent
 ./bin/jev-droid serve # manually launch the default local GGUF
 ```
 
 The installed command `~/.local/bin/jev-droid` points at `bin/jev-droid`.
+A single argument matching a configured profile (for example, `jev-droid julia`)
+starts its server exactly like `--model julia serve`; it does **not** change
+the default profile for hooks or future requests. Other one-word arguments
+remain normal task descriptions. Press Ctrl+C to stop a manually served model.
 The existing Codex `UserPromptSubmit` hook uses the same command with JSON
 on stdin. Listing skills does not start a model. A routing query may start the
-owned `jev-droid-backend.service` and holds a lease until completion; the
-service shuts down after configured idle time.
+owned `jev-droid-backend.service` and holds a lease until completion.
+
+**Automatic model unloading:** Native and managed profiles route their HTTP
+endpoint through a fork-owned loopback proxy. It tracks active inference
+responses from every client (including Jeo), not only Droid's own leases.
+A model is never idled while a response is in progress; the idle timer starts
+after the last response finishes. Startup/loading time does not count as idle.
+The profile's `idle_timeout_seconds` controls unloading; health/model-list
+checks do not reset it. Explicit termination still stops the server. Gateway
+profiles remain owned by the external service and are not stopped by Droid.
 
 Local configuration: `~/.config/jev-skill-router/droid.json` (or
 `JEV_DROID_CONFIG`). This is a separate, local-only configuration from the
@@ -146,7 +159,7 @@ The same runner supports `staged` for a large native System One GGUF on a
 slow or incompatible mounted filesystem. This mode accepts
 `["staged", "/absolute/path/to/model.gguf"]`, starts standalone llama.cpp
 on the profile endpoint's port, and removes its private `/dev/shm` copy on
-shutdown. It verifies free RAM before staging, requires at least the model
+shutdown, including interrupted staging. It verifies free RAM before staging, requires at least the model
 size plus 3 GiB available, and uses 1 MiB streaming reads. Startup can take
 minutes for large Windows-mounted files; set `startup_timeout_seconds` to
 cover staging, and configure `load_mode: "mmap"`, `no_warmup: true`,

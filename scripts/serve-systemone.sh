@@ -41,8 +41,11 @@ mkdir -p "$runtime"
 chmod 700 "$runtime"
 llama_pid=""
 adapter_pid=""
+stage_pid=""
 stage_dir=""
 cleanup() {
+  [[ -z "$stage_pid" ]] || kill "$stage_pid" 2>/dev/null || true
+  [[ -z "$stage_pid" ]] || wait "$stage_pid" 2>/dev/null || true
   [[ -z "$adapter_pid" ]] || kill "$adapter_pid" 2>/dev/null || true
   [[ -z "$llama_pid" ]] || kill "$llama_pid" 2>/dev/null || true
   [[ -z "$adapter_pid" ]] || wait "$adapter_pid" 2>/dev/null || true
@@ -63,7 +66,10 @@ if [[ "$adapter" == "staged" ]]; then
     exit 1
   fi
   stage_dir=$(mktemp -d /dev/shm/jev-droid-gguf.XXXXXXXX)
-  dd if="$gguf" of="$stage_dir/model.gguf" bs=1M iflag=fullblock status=none
+  dd if="$gguf" of="$stage_dir/model.gguf" bs=1M iflag=fullblock status=none &
+  stage_pid=$!
+  wait "$stage_pid"
+  stage_pid=""
   if [[ $(stat -c '%s' "$stage_dir/model.gguf") != "$required_bytes" ]]; then
     echo "Staged GGUF size mismatch" >&2
     exit 1

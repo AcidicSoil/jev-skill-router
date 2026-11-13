@@ -8,6 +8,7 @@ Usage:
   jev-droid models            List configured model profiles without loading models
   jev-droid list              List eligible Codex skills without loading a model
   jev-droid "task description" Recommend skills using the configured local model
+  jev-droid NAME                             Serve a configured model profile
   jev-droid --model NAME "task description"  Route using a named model profile
   jev-droid --model NAME serve               Serve its local GGUF with idle unload
   jev-droid serve             Serve the default local GGUF with idle unload
@@ -34,10 +35,15 @@ function parseNamedCommand(args) {
   return { action: args[2], profile: args[1] };
 }
 
-function parseCommand(args) {
+async function parseCommand(args) {
   if (args[0] === '--model') return parseNamedCommand(args);
   if (args.length > 1) throw new Error('JEV_DROID_ARGUMENT_INVALID');
-  return { action: args[0], profile: undefined };
+  const action = args[0];
+  if (action && !['models', 'list', 'serve'].includes(action) &&
+      (await listDroidProfiles()).includes(action)) {
+    return { action: 'serve', profile: action };
+  }
+  return { action, profile: undefined };
 }
 
 async function printProfiles() {
@@ -94,7 +100,7 @@ async function main(args) {
     process.stdout.write(usage + '\n');
     return;
   }
-  const { action, profile } = parseCommand(args);
+  const { action, profile } = await parseCommand(args);
   if (action === 'models') return printProfiles();
   const config = await loadDroidConfig(undefined, profile);
   if (action === 'list') return printSkills(config);

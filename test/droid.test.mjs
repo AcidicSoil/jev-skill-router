@@ -105,11 +105,17 @@ try {
     'never rewrite unrelated configuration or upstream testing copies');
   const fakeServer = join(root, 'fake-llama');
   const serverOutput = join(root, 'fake-llama-args');
-  await writeFile(fakeServer, `#!/bin/sh
-printf '%s\n' "$@" > ${JSON.stringify(serverOutput)}
-trap 'kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; exit 0' TERM
-sleep 100 & child=$!
-wait "$child"
+  await writeFile(fakeServer, `#!/usr/bin/env node
+const { createServer } = require('node:http');
+const { writeFileSync } = require('node:fs');
+writeFileSync(${JSON.stringify(serverOutput)}, process.argv.slice(2).join('\\n'));
+const port = Number(process.argv[process.argv.indexOf('--port') + 1]);
+const server = createServer((_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.end(JSON.stringify({ status: 'ok' }));
+});
+server.listen(port, '127.0.0.1');
+process.on('SIGTERM', () => server.close(() => process.exit(0)));
 `, { mode: 0o700 });
   const executableModel = join(root, 'native.gguf');
   await writeFile(executableModel, 'fixture');
